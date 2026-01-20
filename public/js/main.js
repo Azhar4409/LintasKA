@@ -4,12 +4,20 @@ import { loadStations, setStationClickHandler } from "./stations.js";
 import { loadRoutes } from "./routes.js";
 import { initTrains, getStationScheduleData } from "./trains.js";
 
-const map = initMap();
+async function startApp() {
+    try {
+        const map = initMap();
+        addMapClock(map);
+        
+        await loadRoutes(map);
+        await loadStations(map);
+        await initTrains(map);
 
-addMapClock(map);
-await loadRoutes(map);
-await loadStations(map);
-await initTrains(map);
+        setStationClickHandler(getStationScheduleData);
+        console.log("Aplikasi berhasil dimuat");
+    } catch (error) {
+        console.error("Gagal memuat aplikasi:", error);
+    }
+}
 
-// Set up station click handler
-setStationClickHandler(getStationScheduleData);
+startApp();
