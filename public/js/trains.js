@@ -1,543 +1,188 @@
+/**
+ * LINTASKA ENGINE - PRO VERSION
+ * Optimized for high-frequency updates and multi-day train scheduling.
+ */
+
 let trainLayer;
-let trainMarkers = {};
-let gapekaData = {};
-let stationsData = {};
-let simulationTimeMs = null; // null = use current time
+let trainMarkers = new Map(); // Menggunakan Map untuk performa akses O(1)
+let gapekaData = [];
+let stationsData = new Map(); // Map untuk lookup posisi stasiun kilat
+let simulationTimeMs = null; 
 
+/**
+ * Inisialisasi Sistem Kereta
+ */
 export async function initTrains(map) {
-  if (trainLayer) map.removeLayer(trainLayer);
-  trainLayer = L.layerGroup().addTo(map);
+    if (trainLayer) map.removeLayer(trainLayer);
+    trainLayer = L.layerGroup().addTo(map);
 
-  // Load stations data for position mapping
-  try {
-    const stRes = await fetch("/api/stations");
-    const stData = await stRes.json();
-    stData.data.forEach((st) => {
-      stationsData[st.cd] = st.pos;
-    });
-    console.log("Stations position map loaded:", Object.keys(stationsData).length, "stations");
-  } catch (e) {
-    console.error("Error loading stations:", e);
-    return;
-  }
+    try {
+        // Fetch data secara paralel (Non-blocking)
+        const [stRes, gapRes] = await Promise.all([
+            fetch("./data/stations.json"),
+            fetch("./data/gapeka.json")
+        ]);
 
-  // Load gapeka data
-  try {
-    const res = await fetch("/api/gapeka");
-    gapekaData = await res.json();
-    console.log("GAPeKA data loaded:", gapekaData.data.length, "trains");
-    
-    // Enrich paths with station positions
-    enrichTrainPaths();
-  } catch (e) {
-    console.error("Error loading gapeka data:", e);
-    return;
-  }
+        const stJson = await stRes.json();
+        const gapJson = await gapRes.json();
 
-  // Setup time control UI
-  setupTimeControl();
+        // Indexing posisi stasiun
+        stJson.data.forEach(st => stationsData.set(st.cd, st.pos));
+        gapekaData = gapJson.data;
 
-  // Start real-time train updates
-  updateTrainPositions();
-  setInterval(updateTrainPositions, 1000); // Update every second
+        // Injeksi data posisi ke jalur kereta
+        enrichTrainPaths();
+        
+        // Inisialisasi kontrol waktu
+        setupTimeControl();
+
+        // Loop Utama: Jalankan update posisi setiap 1 detik
+        updateTrainPositions();
+        setInterval(updateTrainPositions, 1000);
+        
+        console.log(`🚀 Lintaska Engine: ${gapekaData.length} jadwal KA berhasil dimuat.`);
+    } catch (e) {
+        console.error("❌ Critical Engine Error:", e);
+    }
 }
 
-function setupTimeControl() {
-  const timeInput = document.getElementById("timeControl");
-  const nowBtn = document.getElementById("nowBtn");
-  const simTimeDisplay = document.getElementById("simTime");
-
-  // Set initial time to current
-  const now = new Date();
-  const hours = String(now.getHours()).padStart(2, "0");
-  const minutes = String(now.getMinutes()).padStart(2, "0");
-  timeInput.value = `${hours}:${minutes}`;
-  simulationTimeMs = getCurrentTimeMs();
-
-  // Update simulation time when input changes
-  timeInput.addEventListener("change", (e) => {
-    const [hours, minutes] = e.target.value.split(":");
-    simulationTimeMs = parseInt(hours) * 3600000 + parseInt(minutes) * 60000;
-    updateTrainPositions();
-    console.log(`⏰ Waktu simulasi diubah ke: ${e.target.value}`);
-  });
-
-  // Reset to current time
-  nowBtn.addEventListener("click", () => {
-    simulationTimeMs = null; // Use current time
-    const now = new Date();
-    const hours = String(now.getHours()).padStart(2, "0");
-    const minutes = String(now.getMinutes()).padStart(2, "0");
-    timeInput.value = `${hours}:${minutes}`;
-    updateTrainPositions();
-    console.log("⏰ Kembali ke waktu sekarang");
-  });
-}
-
-function getCurrentTimeMs() {
-  // Get time in milliseconds since midnight
-  const now = new Date();
-  return now.getHours() * 3600000 + now.getMinutes() * 60000 + now.getSeconds() * 1000;
-}
-
+/**
+ * Validasi dan Injeksi Posisi ke dalam Path Kereta
+ */
 function enrichTrainPaths() {
-  if (!gapekaData.data) return;
-
-  gapekaData.data.forEach((train) => {
-    if (!train.paths) return;
-
-    train.paths.forEach((path) => {
-      if (!path.pos && stationsData[path.st_cd]) {
-        path.pos = stationsData[path.st_cd];
-      }
+    gapekaData.forEach(train => {
+        if (!train.paths) return;
+        train.paths.forEach(path => {
+            if (!path.pos && stationsData.has(path.st_cd)) {
+                path.pos = stationsData.get(path.st_cd);
+            }
+        });
     });
-  });
-  
-  console.log("Train paths enriched with station positions");
 }
 
+/**
+ * Core Algorithm: Kalkulasi Posisi Presisi dengan Windowing 24 Jam
+ */
 function getTrainPosition(train, timeMs) {
-  // Find where the train is at this time
-  if (!train.paths || train.paths.length === 0) return null;
+    const paths = train.paths;
+    if (!paths || paths.length < 2) return null;
 
-  let position = null;
-  let found = false;
+    const DAY_MS = 86400000;
+    
+    // Triple Window Logic: Cek waktu sekarang, kemarin (lintas hari), dan besok
+    // Menjamin kereta malam tidak hilang saat melewati jam 00:00
+    const checkWindows = [timeMs, timeMs + DAY_MS, timeMs - DAY_MS];
 
-  // Hitung apakah kereta lintas hari (depart hari pertama, arriv hari berikutnya)
-  const firstDepart = train.paths[0].depart_ms;
-  const lastArriv = train.paths[train.paths.length - 1].arriv_ms;
-  const isMultiDay = lastArriv < firstDepart; // arriv < depart = lintas hari
-  
-  // Buat comparison time: jika kereta lintas hari dan waktu masih pagi (sebelum berangkat),
-  // tambah 1 hari penuh untuk perbandingan
-  let comparisonTimeMs = timeMs;
-  if (isMultiDay && timeMs < firstDepart) {
-    comparisonTimeMs = timeMs + 86400000; // Tambah 1 hari (24 jam dalam ms)
-  }
+    for (const t of checkWindows) {
+        for (let i = 0; i < paths.length - 1; i++) {
+            const curr = paths[i];
+            const next = paths[i + 1];
 
-  // Find the segment the train is on
-  for (let i = 0; i < train.paths.length - 1; i++) {
-    const currentStop = train.paths[i];
-    const nextStop = train.paths[i + 1];
+            // 1. Status: Berhenti di Stasiun
+            if (t >= curr.arriv_ms && t <= curr.depart_ms) {
+                return { lat: curr.pos[0], lng: curr.pos[1], status: "STOP", station: curr.st_cd };
+            }
 
-    // Parse time from depart_ms and arriv_ms only
-    const currentDepartMs = currentStop.depart_ms;
-    const nextArrivMs = nextStop.arriv_ms;
-
-    // Check if train is in this segment
-    if (comparisonTimeMs >= currentDepartMs && comparisonTimeMs <= nextArrivMs) {
-      found = true;
-
-      // Check if both stops have position data
-      if (!currentStop.pos || !nextStop.pos) {
-        break;
-      }
-
-      if (currentDepartMs === nextArrivMs) {
-        // Train is at a station
-        position = {
-          lat: currentStop.pos[0],
-          lng: currentStop.pos[1],
-          station: currentStop.st_cd,
-          status: "station",
-        };
-      } else {
-        // Train is between stations - interpolate
-        const totalTime = nextArrivMs - currentDepartMs;
-        const elapsedTime = comparisonTimeMs - currentDepartMs;
-        const progress = elapsedTime / totalTime;
-
-        const lat1 = currentStop.pos[0];
-        const lng1 = currentStop.pos[1];
-        const lat2 = nextStop.pos[0];
-        const lng2 = nextStop.pos[1];
-
-        position = {
-          lat: lat1 + (lat2 - lat1) * progress,
-          lng: lng1 + (lng2 - lng1) * progress,
-          from: currentStop.st_cd,
-          to: nextStop.st_cd,
-          status: "moving",
-        };
-      }
-      break;
+            // 2. Status: Berjalan (Interpolasi Linear Spasial)
+            if (t > curr.depart_ms && t < next.arriv_ms) {
+                const ratio = (t - curr.depart_ms) / (next.arriv_ms - curr.depart_ms);
+                return {
+                    lat: curr.pos[0] + (next.pos[0] - curr.pos[0]) * ratio,
+                    lng: curr.pos[1] + (next.pos[1] - curr.pos[1]) * ratio,
+                    status: "MOVING", from: curr.st_cd, to: next.st_cd
+                };
+            }
+        }
     }
-  }
-
-  // Check if train hasn't started yet
-  if (!found && train.paths[0]) {
-    const firstDepartMs = train.paths[0].depart_ms;
-    if (comparisonTimeMs < firstDepartMs) {
-      if (train.paths[0].pos) {
-        position = {
-          lat: train.paths[0].pos[0],
-          lng: train.paths[0].pos[1],
-          station: train.paths[0].st_cd,
-          status: "waiting",
-        };
-      }
-    }
-  }
-
-  return position;
+    return null;
 }
 
+/**
+ * Sync Engine: Mengelola State Marker di Peta
+ */
 function updateTrainPositions() {
-  const timeMs = simulationTimeMs !== null ? simulationTimeMs : getCurrentTimeMs();
-  const timeStr = formatTime(timeMs);
+    const now = simulationTimeMs !== null ? simulationTimeMs : getCurrentTimeMs();
+    
+    // Update Tampilan Jam di UI
+    const display = document.getElementById("simTime");
+    if (display) display.textContent = formatTime(now);
 
-  // Update display
-  const simTimeDisplay = document.getElementById("simTime");
-  if (simTimeDisplay) {
-    simTimeDisplay.textContent = timeStr;
-  }
+    const activeIds = new Set();
 
-  if (!gapekaData.data) return;
+    gapekaData.forEach(train => {
+        const pos = getTrainPosition(train, now);
+        const id = train.tr_id;
 
-  let activeTrains = 0;
+        if (pos) {
+            activeIds.add(id);
+            renderTrain(train, pos);
+        }
+    });
 
-  gapekaData.data.forEach((train) => {
-    const position = getTrainPosition(train, timeMs);
-
-    if (position) {
-      activeTrains++;
-      const trainId = train.tr_id;
-
-      // Remove old marker if exists
-      if (trainMarkers[trainId]) {
-        trainLayer.removeLayer(trainMarkers[trainId]);
-      }
-
-      // Choose color and icon based on status
-      let color = "#FF6B6B"; // Red for moving
-      let icon = "🚂";
-
-      if (position.status === "station") {
-        color = "#4ECDC4"; // Teal for at station
-        icon = "🛑";
-      } else if (position.status === "waiting") {
-        color = "#FFE66D"; // Yellow for waiting
-        icon = "⏳";
-      }
-
-      const marker = L.circleMarker([position.lat, position.lng], {
-        radius: 8,
-        color: color,
-        fillColor: color,
-        fillOpacity: 0.9,
-        weight: 2,
-      });
-
-      let tooltipText = `<strong>KA ${train.tr_cd}</strong> - ${train.tr_name}`;
-      
-      // Get first and last stop times
-      const firstStop = train.paths[0];
-      const lastStop = train.paths[train.paths.length - 1];
-      const departTime = formatTime(firstStop?.depart_ms || 0);
-      const arrivTime = formatTime(lastStop?.arriv_ms || 0);
-      
-      tooltipText += `<br/><strong>Berangkat:</strong> ${departTime} dari ${train.start_st_cd}`;
-      tooltipText += `<br/><strong>Tiba:</strong> ${arrivTime} di ${train.end_st_cd}`;
-      tooltipText += `<br/><small style="color: #0066cc; cursor: pointer;"><u>Klik untuk jadwal lengkap</u></small>`;
-      
-      if (position.status === "station") {
-        tooltipText += `<br/>📍 Sedang berhenti di: ${position.station}`;
-      } else if (position.status === "moving") {
-        tooltipText += `<br/>🚃 Sedang berjalan: ${position.from} → ${position.to}`;
-      } else if (position.status === "waiting") {
-        tooltipText += `<br/>⏳ Menunggu di: ${position.station}`;
-      }
-
-      marker.bindPopup(tooltipText).bindTooltip(`${icon} KA ${train.tr_cd}`);
-      
-      // Add click event to show schedule
-      marker.on('click', () => {
-        marker.closePopup(); // Close popup first
-        showTrainSchedule(train);
-      });
-      
-      marker.addTo(trainLayer);
-      trainMarkers[trainId] = marker;
-    } else {
-      // Remove marker if train is not active
-      if (trainMarkers[train.tr_id]) {
-        trainLayer.removeLayer(trainMarkers[train.tr_id]);
-        delete trainMarkers[train.tr_id];
-      }
+    // Garbage Collection: Hapus marker kereta yang sudah sampai tujuan (tidak aktif)
+    for (const [id, marker] of trainMarkers) {
+        if (!activeIds.has(id)) {
+            trainLayer.removeLayer(marker);
+            trainMarkers.delete(id);
+        }
     }
-  });
+}
 
-  console.log(`⏰ WAKTU: ${timeStr} | 🚂 KERETA AKTIF: ${activeTrains}`);
+/**
+ * Rendering Layer: Visualisasi Marker Leaflet
+ */
+function renderTrain(train, pos) {
+    const id = train.tr_id;
+    const isStop = pos.status === "STOP";
+    const color = isStop ? "#4ECDC4" : "#FF6B6B"; // Teal (Berhenti), Coral (Jalan)
+
+    if (!trainMarkers.has(id)) {
+        const marker = L.circleMarker([pos.lat, pos.lng], {
+            radius: 8, weight: 2, color: "#fff", fillColor: color, fillOpacity: 1
+        }).addTo(trainLayer);
+        
+        marker.on('click', () => {
+            marker.closePopup();
+            showTrainSchedule(train);
+        });
+        trainMarkers.set(id, marker);
+    }
+
+    const marker = trainMarkers.get(id);
+    marker.setLatLng([pos.lat, pos.lng]);
+    marker.setStyle({ fillColor: color });
+
+    const tooltip = `<b>KA ${train.tr_cd}</b><br>${isStop ? '📍 Stasiun: '+pos.station : '🚃 '+pos.from+' ➔ '+pos.to}`;
+    marker.bindTooltip(tooltip, { sticky: true });
+}
+
+/**
+ * Time Utilities
+ */
+function getCurrentTimeMs() {
+    const d = new Date();
+    return (d.getHours() * 3600000) + (d.getMinutes() * 60000) + (d.getSeconds() * 1000);
 }
 
 function formatTime(ms) {
-  const hours = Math.floor(ms / 3600000);
-  const minutes = Math.floor((ms % 3600000) / 60000);
-  const seconds = Math.floor((ms % 60000) / 1000);
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    const h = Math.floor((ms % 86400000) / 3600000);
+    const m = Math.floor((ms % 3600000) / 60000);
+    const s = Math.floor((ms % 60000) / 1000);
+    return [h, m, s].map(v => String(v).padStart(2, "0")).join(":");
 }
 
-function showTrainSchedule(train) {
-  // Remove existing modal if any
-  const existingModal = document.getElementById("scheduleModal");
-  if (existingModal) existingModal.remove();
-
-  // Create modal
-  const modal = document.createElement("div");
-  modal.id = "scheduleModal";
-  modal.style.cssText = `
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0,0,0,0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 10000;
-  `;
-
-  const content = document.createElement("div");
-  content.style.cssText = `
-    background: white;
-    border-radius: 8px;
-    padding: 20px;
-    max-width: 600px;
-    max-height: 80vh;
-    overflow-y: auto;
-    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-  `;
-
-  // Title
-  const title = document.createElement("h2");
-  title.style.margin = "0 0 15px 0";
-  title.innerHTML = `🚂 KA ${train.tr_cd} - ${train.tr_name}`;
-
-  // Schedule table
-  const table = document.createElement("table");
-  table.style.cssText = `
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 14px;
-  `;
-
-  const thead = document.createElement("thead");
-  thead.innerHTML = `
-    <tr style="background: #f0f0f0; border-bottom: 2px solid #ddd;">
-      <th style="padding: 10px; text-align: left; border-right: 1px solid #ddd;">Stasiun</th>
-      <th style="padding: 10px; text-align: center; border-right: 1px solid #ddd;">Tiba</th>
-      <th style="padding: 10px; text-align: center;">Berangkat</th>
-    </tr>
-  `;
-  table.appendChild(thead);
-
-  const tbody = document.createElement("tbody");
-  if (train.paths) {
-    train.paths.forEach((path, index) => {
-      const row = document.createElement("tr");
-      row.style.borderBottom = "1px solid #eee";
-
-      const arrivTime = path.arriv_ms ? formatTime(path.arriv_ms) : "-";
-      const departTime = path.depart_ms ? formatTime(path.depart_ms) : "-";
-
-      row.innerHTML = `
-        <td style="padding: 10px; border-right: 1px solid #eee; font-weight: bold;">${path.st_cd}</td>
-        <td style="padding: 10px; text-align: center; border-right: 1px solid #eee; color: #0066cc;">${arrivTime}</td>
-        <td style="padding: 10px; text-align: center; color: #cc0000;">${departTime}</td>
-      `;
-      tbody.appendChild(row);
-    });
-  }
-  table.appendChild(tbody);
-
-  // Close button
-  const closeBtn = document.createElement("button");
-  closeBtn.textContent = "✕ Tutup";
-  closeBtn.style.cssText = `
-    margin-top: 15px;
-    padding: 8px 15px;
-    background: #ff6b6b;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-weight: bold;
-  `;
-  closeBtn.onclick = () => modal.remove();
-
-  content.appendChild(title);
-  content.appendChild(table);
-  content.appendChild(closeBtn);
-  modal.appendChild(content);
-  document.body.appendChild(modal);
-
-  // Close on background click
-  modal.onclick = (e) => {
-    if (e.target === modal) modal.remove();
-  };
-}
-
-export function getStationScheduleData(stationCd, stationName) {
-  const currentTimeMs = getCurrentTimeMs();
-  const currentTimeStr = formatTime(currentTimeMs);
-  
-  const trains = [];
-
-  if (!gapekaData.data) return;
-
-  // Kumpulkan semua kereta yang melalui stasiun ini sepanjang hari
-  gapekaData.data.forEach((train) => {
-    if (!train.paths) return;
-
-    train.paths.forEach((path) => {
-      if (path.st_cd === stationCd) {
-        const pathArrivMs = path.arriv_ms;
-        const pathDepartMs = path.depart_ms;
-        
-        // Jika salah satu tidak valid, skip
-        if (pathArrivMs === null && pathDepartMs === null) return;
-
-        const actualArriv = pathArrivMs ?? pathDepartMs;
-        const actualDepart = pathDepartMs ?? pathArrivMs;
-
-        trains.push({
-          trainCode: train.tr_cd,
-          trainName: train.tr_name,
-          arriv: pathArrivMs ? formatTime(actualArriv) : "-",
-          depart: pathDepartMs ? formatTime(actualDepart) : "-",
-          arrivMs: actualArriv,
-          departMs: actualDepart,
-          fromStation: train.start_st_cd,
-          toStation: train.end_st_cd
-        });
-      }
-    });
-  });
-
-  // Sort by arrival time (ascending), handle wrap-around times
-  trains.sort((a, b) => {
-    const aArriv = a.arrivMs || 0;
-    const bArriv = b.arrivMs || 0;
+function setupTimeControl() {
+    const input = document.getElementById("timeControl");
+    const btn = document.getElementById("nowBtn");
     
-    // Jika ada pembungkus hari (kereta lintas hari), sort dengan logic khusus
-    const modDay = 86400000; // 1 hari dalam ms
-    const aSorted = aArriv < 43200000 ? aArriv + modDay : aArriv; // Jika pagi (< 12jam), anggap hari besok
-    const bSorted = bArriv < 43200000 ? bArriv + modDay : bArriv;
-    return aSorted - bSorted;
-  });
-
-  showStationScheduleModal(stationCd, stationName, trains, currentTimeStr);
-}
-
-function showStationScheduleModal(stationCd, stationName, trains, currentTimeStr) {
-  // Remove existing modal if any
-  const existingModal = document.getElementById("stationScheduleModal");
-  if (existingModal) existingModal.remove();
-
-  // Create modal
-  const modal = document.createElement("div");
-  modal.id = "stationScheduleModal";
-  modal.style.cssText = `
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0,0,0,0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 10000;
-  `;
-
-  const content = document.createElement("div");
-  content.style.cssText = `
-    background: white;
-    border-radius: 8px;
-    padding: 20px;
-    max-width: 800px;
-    max-height: 85vh;
-    overflow-y: auto;
-    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-  `;
-
-  // Title
-  const title = document.createElement("h2");
-  title.style.cssText = "margin: 0 0 10px 0; font-size: 20px;";
-  title.innerHTML = `📍 <strong>${stationCd}</strong> - ${stationName}`;
-
-  const timeInfo = document.createElement("div");
-  timeInfo.style.cssText = "margin-bottom: 15px; color: #666; font-size: 13px; border-bottom: 1px solid #eee; padding-bottom: 10px;";
-  timeInfo.innerHTML = `Jadwal Lengkap Sehari | Waktu Sekarang: <strong>${currentTimeStr}</strong> | Total Kereta: <strong>${trains.length}</strong>`;
-
-  // Schedule table
-  const table = document.createElement("table");
-  table.style.cssText = `
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  `;
-
-  const thead = document.createElement("thead");
-  thead.innerHTML = `
-    <tr style="background: #f0f0f0; border-bottom: 2px solid #ddd; position: sticky; top: 0;">
-      <th style="padding: 10px; text-align: left; border-right: 1px solid #ddd;">No. KA</th>
-      <th style="padding: 10px; text-align: left; border-right: 1px solid #ddd;">Nama Kereta</th>
-      <th style="padding: 10px; text-align: center; border-right: 1px solid #ddd; min-width: 70px;">Datang</th>
-      <th style="padding: 10px; text-align: center; border-right: 1px solid #ddd; min-width: 70px;">Berangkat</th>
-      <th style="padding: 10px; text-align: left;">Rute</th>
-    </tr>
-  `;
-  table.appendChild(thead);
-
-  const tbody = document.createElement("tbody");
-  if (trains.length === 0) {
-    const row = document.createElement("tr");
-    row.innerHTML = `<td colspan="5" style="padding: 20px; text-align: center; color: #999;">Tidak ada kereta di stasiun ini</td>`;
-    tbody.appendChild(row);
-  } else {
-    trains.forEach((train) => {
-      const row = document.createElement("tr");
-      row.style.borderBottom = "1px solid #eee";
-
-      row.innerHTML = `
-        <td style="padding: 10px; border-right: 1px solid #eee; font-weight: bold; color: #0066cc;">KA ${train.trainCode}</td>
-        <td style="padding: 10px; border-right: 1px solid #eee;">${train.trainName}</td>
-        <td style="padding: 10px; text-align: center; border-right: 1px solid #eee; color: #0066cc; font-weight: bold;">${train.arriv}</td>
-        <td style="padding: 10px; text-align: center; border-right: 1px solid #eee; color: #cc0000; font-weight: bold;">${train.depart}</td>
-        <td style="padding: 10px;">${train.fromStation} → ${train.toStation}</td>
-      `;
-      tbody.appendChild(row);
+    input?.addEventListener("change", (e) => {
+        const [h, m] = e.target.value.split(":");
+        simulationTimeMs = (parseInt(h) * 3600000) + (parseInt(m) * 60000);
+        updateTrainPositions();
     });
-  }
-  table.appendChild(tbody);
 
-  // Close button
-  const closeBtn = document.createElement("button");
-  closeBtn.textContent = "✕ Tutup";
-  closeBtn.style.cssText = `
-    margin-top: 15px;
-    padding: 10px 20px;
-    background: #ff6b6b;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-weight: bold;
-    width: 100%;
-  `;
-  closeBtn.onclick = () => modal.remove();
-
-  content.appendChild(title);
-  content.appendChild(timeInfo);
-  content.appendChild(table);
-  content.appendChild(closeBtn);
-  modal.appendChild(content);
-  document.body.appendChild(modal);
-
-  // Close on background click
-  modal.onclick = (e) => {
-    if (e.target === modal) modal.remove();
-  };
+    btn?.addEventListener("click", () => {
+        simulationTimeMs = null; // Kembali ke waktu real-time
+        updateTrainPositions();
+    });
 }

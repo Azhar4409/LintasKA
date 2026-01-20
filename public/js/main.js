@@ -6,18 +6,30 @@ import { initTrains, getStationScheduleData } from "./trains.js";
 
 async function startApp() {
     try {
+        // 1. Inisialisasi Peta
         const map = initMap();
+        
+        // 2. Tambahkan UI Clock
         addMapClock(map);
         
-        await loadRoutes(map);
-        await loadStations(map);
+        // 3. Load Data secara berurutan (PENTING)
+        // Jalankan Routes dan Stations dulu agar trains punya referensi posisi
+        await Promise.all([
+            loadRoutes(map),
+            loadStations(map)
+        ]);
+        
+        // 4. Inisialisasi Pergerakan Kereta
         await initTrains(map);
 
+        // 5. Hubungkan klik stasiun ke fungsi jadwal
         setStationClickHandler(getStationScheduleData);
-        console.log("Aplikasi berhasil dimuat");
+        
+        console.log("✅ Lintaska: Sistem Berhasil Dimuat");
     } catch (error) {
-        console.error("Gagal memuat aplikasi:", error);
+        console.error("❌ Lintaska Error:", error);
     }
 }
 
+// Jalankan aplikasi
 startApp();
