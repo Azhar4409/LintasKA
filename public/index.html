@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <title>Aplikasi Tracking Kereta Api</title>
+
+  <!-- Leaflet -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    defer
+  ></script>
+
+  <style>
+    html, body, #map {
+      margin: 0;
+      height: 100%;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- Time Control -->
+<div style="position: absolute; top: 10px; left: 50px; background: white; padding: 10px; border-radius: 5px; z-index: 1000; box-shadow: 0 0 10px rgba(0,0,0,0.2);">
+  <label style="font-weight: bold; display: block; margin-bottom: 8px;">⏰ Atur Waktu Simulasi</label>
+  <div style="display: flex; gap: 10px; align-items: center;">
+    <input type="time" id="timeControl" style="padding: 5px; border: 1px solid #ccc; border-radius: 3px;">
+    <button id="nowBtn" style="padding: 5px 10px; background: #4CAF50; color: white; border: none; border-radius: 3px; cursor: pointer;">Sekarang</button>
+  </div>
+  <div style="margin-top: 8px; font-size: 12px; color: #666;">
+    Waktu Simulasi: <span id="simTime">--:--:--</span>
+  </div>
+</div>
+
+<!-- 🚨 SATU-SATUNYA JS YANG DIPANGGIL -->
+<script type="module" src="/js/main.js"></script>
+
+</body>
+</html>
