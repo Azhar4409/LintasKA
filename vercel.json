@@ -1,19 +1,11 @@
 {
   "version": 2,
+  "public": true,
   "cleanUrls": true,
-  "trailingSlash": false,
   "rewrites": [
-    {
-      "source": "/api/stations",
-      "destination": "/data/stations.json"
-    },
-    {
-      "source": "/api/gapeka",
-      "destination": "/data/gapeka.json"
-    },
-    {
-      "source": "/api/routes",
-      "destination": "/data/route-path.json"
-    }
+    { "source": "/api/stations", "destination": "/data/stations.json" },
+    { "source": "/api/gapeka", "destination": "/data/gapeka.json" },
+    { "source": "/api/routes", "destination": "/data/route-path.json" },
+    { "source": "/(.*)", "destination": "/public/$1" }
   ]
 }
