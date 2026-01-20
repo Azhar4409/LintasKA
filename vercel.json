@@ -1,27 +1,19 @@
 {
   "version": 2,
-  "builds": [
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "rewrites": [
     {
-      "src": "index.js",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "index.js"
+      "source": "/api/stations",
+      "destination": "/data/stations.json"
     },
     {
-      "src": "/(.*)",
-      "dest": "/$1",
-      "continue": true
+      "source": "/api/gapeka",
+      "destination": "/data/gapeka.json"
     },
     {
-      "handle": "filesystem"
-    },
-    {
-      "src": "/.*",
-      "dest": "index.js"
+      "source": "/api/routes",
+      "destination": "/data/route-path.json"
     }
   ]
 }
